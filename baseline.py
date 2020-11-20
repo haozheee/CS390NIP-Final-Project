@@ -22,7 +22,7 @@ tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
                                                   oov_token="<unk>",
                                                   filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
 VOCAB_SIZE = top_k+1
-
+CHECKPOINT_PATH = "./checkpoints/train"
 
 
 class EncoderModel(tf.keras.Model):
@@ -38,6 +38,7 @@ class EncoderModel(tf.keras.Model):
     Output: 
         embedding: encoded vector of image features, which will be passed into the sequence model in the decoder (LSTM)
     '''
+
     def call(self, image_feature_vector):
         x = self.fc(image_feature_vector)
         x = tf.nn.relu(x)
@@ -58,7 +59,8 @@ class DecoderModel(tf.keras.Model):
         self.attendDense = tf.keras.layers.Dense(1)
 
         # decoder layers
-        self.embeddingLayer = tf.keras.Embedding(vocab_size, pred_embedding_dim)
+        self.embeddingLayer = tf.keras.Embedding(
+            vocab_size, pred_embedding_dim)
         self.decoderGRU = tf.keras.layers.GRU(hidden_dim)
         self.decoderFC1 = tf.keras.Dense(hidden_dim)
         self.decoderFC2 = tf.keras.Dense(vocab_size)
@@ -72,6 +74,7 @@ class DecoderModel(tf.keras.Model):
            predict: the predicted token for the time step t
            hidden_state: the hidden state from the decoder GRU at the time step t
        '''
+
     def call(self, image_embedding, previous_predict, previous_hidden_state):
 
         # A. attention mechanism:
@@ -90,7 +93,8 @@ class DecoderModel(tf.keras.Model):
 
         # concatenate context_vector and predict_embedding to use as the input to GRU
         # concat_embedding: (batch_size, 1, pred_embedding_dim + hidden_size)
-        concat_embedding = tf.concat([tf.expand_dims(context_vector, 1), predict_embedding], axis=-1)
+        concat_embedding = tf.concat(
+            [tf.expand_dims(context_vector, 1), predict_embedding], axis=-1)
 
         # passing the concatenated vector to the GRU
         predict, hidden_state = self.decoderGRU(concat_embedding)
@@ -275,11 +279,25 @@ def preprocessData(raw):
 
 def trainModel(dataset, epochs=10000):
     encoder = EncoderModel(image_embedding_dim=128)
-    decoder = DecoderModel(pred_embedding_dim=128, hidden_dim=128, vocab_size=VOCAB_SIZE)
+    decoder = DecoderModel(pred_embedding_dim=128,
+                           hidden_dim=128, vocab_size=VOCAB_SIZE)
 
     optimizer = tf.keras.optimizers.Adam()
     loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
         from_logits=True, reduction='none')
+
+    # Create checkpoint manager (and read from checkpoint dir)
+    ckpt = tf.train.Checkpoint(encoder=encoder,
+                               decoder=decoder,
+                               optimizer=optimizer)
+    ckpt_manager = tf.train.CheckpointManager(
+        ckpt, CHECKPOINT_PATH, max_to_keep=5)
+
+    # Restore checkpoint if needed
+    start_epoch = 0
+    if ckpt_manager.latest_checkpoint:
+        start_epoch = int(ckpt_manager.latest_checkpoint.split('-')[-1])
+        ckpt.restore(ckpt_manager.latest_checkpoint)
 
     def loss_function(real, pred):
         mask = tf.math.logical_not(tf.math.equal(real, 0))
@@ -288,14 +306,16 @@ def trainModel(dataset, epochs=10000):
         loss_ *= mask
         return tf.reduce_mean(loss_)
 
-    for epoch in range(epochs):
+    # Continue from previous epoch if needed
+    for epoch in range(start_epoch, epochs):
         total_loss = 0
         for (batch, (image, caption)) in enumerate(dataset):
             loss = 0
             # use 0s as the initial hidden state to feed in the GRU
             previous_hidden_state = tf.zeros((BATCH_SIZE, decoder.hidden_dim))
             # use <start> as the initial predict to feed in the GRU
-            previous_decoder_predict = tf.expand_dims([tokenizer.word_index['<start>']] * caption.shape[0], 1)
+            previous_decoder_predict = tf.expand_dims(
+                [tokenizer.word_index['<start>']] * caption.shape[0], 1)
 
             with tf.GradientTape() as tape:
                 image_features = encoder.call(image)
@@ -315,24 +335,82 @@ def trainModel(dataset, epochs=10000):
             gradients = tape.gradient(loss, trainable_variables)
             optimizer.apply_gradients(zip(gradients, trainable_variables))
 
-            total_loss = total_loss + (loss / int(caption.shape[1]))  # average over the length of caption
+            # average over the length of caption
+            total_loss = total_loss + (loss / int(caption.shape[1]))
 
         if epochs % 100 == 0:
             print('Epoch {} Loss {:.4f}'.format(
                 epoch + 1, total_loss))
-        # TODO: checkpoint saving
-        '''
+
+        # Checkpoint saving
         if epoch % 5 == 0:
             ckpt_manager.save()
 
-        '''
-
-        return encoder, decoder
+    return encoder, decoder
 
 
-def runModel(test_x, test_y):
-    # TODO: complete the model
-    pass
+def evaluate(image):
+    attention_plot = np.zeros((max_length, attention_features_shape))
+
+    hidden = decoder.reset_state(batch_size=1)
+
+    temp_input = tf.expand_dims(load_image(image)[0], 0)
+    img_tensor_val = image_features_extract_model(temp_input)
+    img_tensor_val = tf.reshape(
+        img_tensor_val, (img_tensor_val.shape[0], -1, img_tensor_val.shape[3]))
+
+    features = encoder(img_tensor_val)
+
+    dec_input = tf.expand_dims([tokenizer.word_index['<start>']], 0)
+    result = []
+
+    for i in range(max_length):
+        predictions, hidden, attention_weights = decoder(
+            dec_input, features, hidden)
+
+        attention_plot[i] = tf.reshape(attention_weights, (-1, )).numpy()
+
+        predicted_id = tf.random.categorical(predictions, 1)[0][0].numpy()
+        result.append(tokenizer.index_word[predicted_id])
+
+        if tokenizer.index_word[predicted_id] == '<end>':
+            return result, attention_plot
+
+        dec_input = tf.expand_dims([predicted_id], 0)
+
+    attention_plot = attention_plot[:len(result), :]
+    return result, attention_plot
+
+
+def plot_attention(image, result, attention_plot):
+    temp_image = np.array(Image.open(image))
+
+    fig = plt.figure(figsize=(10, 10))
+
+    len_result = len(result)
+    for l in range(len_result):
+        temp_att = np.resize(attention_plot[l], (8, 8))
+        ax = fig.add_subplot(len_result//2, len_result//2, l+1)
+        ax.set_title(result[l])
+        img = ax.imshow(temp_image)
+        ax.imshow(temp_att, cmap='gray', alpha=0.6, extent=img.get_extent())
+
+    plt.tight_layout()
+    plt.show()
+
+
+# def runModel(test_x, test_y):
+# Run captioning on validation set
+def runModel(test, model):
+    rid = np.random.randint(0, len(img_name_val))
+    image = img_name_val[rid]
+    real_caption = ' '.join([tokenizer.index_word[i]
+                             for i in cap_val[rid] if i not in [0]])
+    result, attention_plot = evaluate(image)
+
+    print('Real Caption:', real_caption)
+    print('Prediction Caption:', ' '.join(result))
+    plot_attention(image, result, attention_plot)
 
 
 def main():
