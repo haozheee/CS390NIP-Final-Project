@@ -9,21 +9,28 @@ import json
 from glob import glob
 from PIL import Image
 import pickle
+import matplotlib.pyplot as plt
 
 
 # global variables
 
 # I put it outside the function because this needs to be referenced in training. Haozhe 11/09/20
 
+FEATURE_SIZE = 2048
+ATTENTION_SIZE = 64
 BATCH_SIZE = 64
 BUFFER_SIZE = 1000
+MAX_LENGTH = 0  # will be updated after pre-processing
 top_k = 5000
+image_features_extract_model = None  # will be updated after pre-processing
 tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
                                                   oov_token="<unk>",
                                                   filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
 VOCAB_SIZE = top_k+1
 CHECKPOINT_PATH = "./checkpoints/train"
 
+img_name_val = []
+cap_val = []
 
 class EncoderModel(tf.keras.Model):
     def __init__(self, image_embedding_dim):
@@ -131,16 +138,16 @@ def map_func(img_name, cap):
 
 def getRawData():
     annotation_folder = '/annotations/'
-    annotation_file = ''
+    annotation_file = './annotations/captions_train2014.json'
     if not os.path.exists(os.path.abspath('.') + annotation_folder):
         annotation_zip = tf.keras.utils.get_file('captions.zip',
                                                  cache_subdir=os.path.abspath(
                                                      '.'),
                                                  origin='http://images.cocodataset.org/annotations/annotations_trainval2014.zip',
                                                  extract=True)
-        annotation_file = os.path.dirname(
+        '''annotation_file = os.path.dirname(
             annotation_zip) + '/annotations/captions_train2014.json'
-        os.remove(annotation_zip)
+        os.remove(annotation_zip)'''
 
     # Download image files
     image_folder = '/train2014/'
@@ -168,6 +175,9 @@ def getRawData():
 
 
 def preprocessData(raw):
+    global MAX_LENGTH
+    global image_feature_extraction_model
+
     image_paths, image_path_to_caption = raw
 
     # before pre-processing, each image is corresponding to multiple caption.
@@ -226,7 +236,7 @@ def preprocessData(raw):
         train_seqs, padding='post')
 
     # Calculates the max_length, which is used to store the attention weights
-    max_length = calc_max_length(train_seqs)
+    MAX_LENGTH = calc_max_length(train_seqs)
 
     # Split the data into training and testing
 
@@ -249,8 +259,6 @@ def preprocessData(raw):
         img_name_train.extend([imgt] * capt_len)
         cap_train.extend(img_to_cap_vector[imgt])
 
-    img_name_val = []
-    cap_val = []
     for imgv in img_name_val_keys:
         capv_len = len(img_to_cap_vector[imgv])
         img_name_val.extend([imgv] * capv_len)
@@ -349,22 +357,19 @@ def trainModel(dataset, epochs=10000):
     return encoder, decoder
 
 
-def evaluate(image):
-    attention_plot = np.zeros((max_length, attention_features_shape))
-
+def evaluate(image, encoder, decoder):
+    attention_plot = np.zeros((MAX_LENGTH, ATTENTION_SIZE))
     hidden = decoder.reset_state(batch_size=1)
-
     temp_input = tf.expand_dims(load_image(image)[0], 0)
     img_tensor_val = image_features_extract_model(temp_input)
     img_tensor_val = tf.reshape(
         img_tensor_val, (img_tensor_val.shape[0], -1, img_tensor_val.shape[3]))
 
     features = encoder(img_tensor_val)
-
     dec_input = tf.expand_dims([tokenizer.word_index['<start>']], 0)
     result = []
 
-    for i in range(max_length):
+    for i in range(MAX_LENGTH):
         predictions, hidden, attention_weights = decoder(
             dec_input, features, hidden)
 
@@ -399,9 +404,10 @@ def plot_attention(image, result, attention_plot):
     plt.show()
 
 
-# def runModel(test_x, test_y):
 # Run captioning on validation set
-def runModel(test, model):
+# This only runs on 1 random sample in our dataset.
+# This is for previewing the results only, since we will have a separate evaluation script
+def runModel():
     rid = np.random.randint(0, len(img_name_val))
     image = img_name_val[rid]
     real_caption = ' '.join([tokenizer.index_word[i]
@@ -416,19 +422,9 @@ def runModel(test, model):
 def main():
     print("Image Captioning Main")
     raw = getRawData()
-    dataset = preprocessData(raw)
-    model = trainModel(dataset)
-    '''preds = runModel(data_, model)
-    evalResults(data[1], preds)
-
-    # classification on IRIS
-    print("Classification on IRIS")
-    raw = getRawDataIris()
-    data = preprocessDataIris(raw)
-    model = trainModelIris(data[0])
-    preds = runModel(data[1][0], model)
-    evalResults(data[1], preds)'''
-
+    train_dataset, test_dataset = preprocessData(raw)
+    model = trainModel(train_dataset)
+    runModel()
 
 if __name__ == '__main__':
     main()
