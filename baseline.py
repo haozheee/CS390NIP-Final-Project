@@ -4,10 +4,13 @@ import random
 import re
 import numpy as np
 import os
+from os import listdir
+from os.path import isfile, join
 import time
 import json
 from glob import glob
 from PIL import Image
+from tqdm import tqdm
 import pickle
 import matplotlib.pyplot as plt
 
@@ -21,6 +24,7 @@ ATTENTION_SIZE = 64
 BATCH_SIZE = 64
 BUFFER_SIZE = 1000
 MAX_LENGTH = 0  # will be updated after pre-processing
+IMAGE_EXAMPLE_SIZE = 6000 # only uses 6000 image. using full image set requires too much storage space.
 top_k = 5000
 image_features_extract_model = None  # will be updated after pre-processing
 tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
@@ -29,15 +33,13 @@ tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
 VOCAB_SIZE = top_k+1
 CHECKPOINT_PATH = "./checkpoints/train"
 
-img_name_val = []
-cap_val = []
 
 class EncoderModel(tf.keras.Model):
     def __init__(self, image_embedding_dim):
         super(EncoderModel, self).__init__()
 
         # encoder layers
-        self.encoderFC = tf.keras.Dense(image_embedding_dim)
+        self.encoderFC = tf.keras.layers.Dense(image_embedding_dim)
 
     '''
     Input: 
@@ -47,7 +49,7 @@ class EncoderModel(tf.keras.Model):
     '''
 
     def call(self, image_feature_vector):
-        x = self.fc(image_feature_vector)
+        x = self.encoderFC(image_feature_vector)
         x = tf.nn.relu(x)
         return x
 
@@ -66,11 +68,11 @@ class DecoderModel(tf.keras.Model):
         self.attendDense = tf.keras.layers.Dense(1)
 
         # decoder layers
-        self.embeddingLayer = tf.keras.Embedding(
+        self.embeddingLayer = tf.keras.layers.Embedding(
             vocab_size, pred_embedding_dim)
-        self.decoderGRU = tf.keras.layers.GRU(hidden_dim)
-        self.decoderFC1 = tf.keras.Dense(hidden_dim)
-        self.decoderFC2 = tf.keras.Dense(vocab_size)
+        self.decoderGRU = tf.keras.layers.GRU(hidden_dim, return_state=True)
+        self.decoderFC1 = tf.keras.layers.Dense(hidden_dim)
+        self.decoderFC2 = tf.keras.layers.Dense(vocab_size)
 
     '''
        Input: 
@@ -85,12 +87,24 @@ class DecoderModel(tf.keras.Model):
     def call(self, image_embedding, previous_predict, previous_hidden_state):
 
         # A. attention mechanism:
-        # uses image_embedding and previous_hidden_state to produce a weighted context vector
+        # use image_embedding and previous_hidden_state to produce attention weights
+        # use this attention weights to filter important features from image_embedding
 
         hidden_with_time_axis = tf.expand_dims(previous_hidden_state, 1)
         at_image = self.attendImage(image_embedding)
-        at_pred = self.attendHidden(previous_hidden_state)
-        context_vector = self.attendDense(tf.nn.tanh(at_image + at_pred))
+        #print("at_image")
+        #print(at_image.shape)
+        at_pred = self.attendHidden(hidden_with_time_axis)
+        #print("at_pred")
+        #print(at_pred.shape)
+        score = self.attendDense(tf.nn.tanh(at_image + at_pred))
+        attention_weights = tf.nn.softmax(score, axis=1)
+        context_vector = attention_weights * image_embedding
+        context_vector = tf.reduce_sum(context_vector, axis=1)
+
+
+        #print("context vector")
+        #print(context_vector.shape)
 
         # B. decoding from attended context vector:
 
@@ -101,20 +115,15 @@ class DecoderModel(tf.keras.Model):
         # concatenate context_vector and predict_embedding to use as the input to GRU
         # concat_embedding: (batch_size, 1, pred_embedding_dim + hidden_size)
         concat_embedding = tf.concat(
-            [tf.expand_dims(context_vector, 1), predict_embedding], axis=-1)
+            [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), predict_embedding], axis=-1)
 
         # passing the concatenated vector to the GRU
         predict, hidden_state = self.decoderGRU(concat_embedding)
 
-        # shape == (batch_size, max_length, hidden_size)
         predict = self.decoderFC1(predict)
-        # x shape == (batch_size * max_length, hidden_size)
-        predict = tf.reshape(predict, (-1, predict.shape[2]))
-
-        # output shape == (batch_size * max_length, vocab)
         predict = self.decoderFC2(predict)
 
-        return predict, hidden_state
+        return predict, hidden_state, attention_weights
 
 
 def load_image(image_path):
@@ -136,30 +145,39 @@ def map_func(img_name, cap):
     return img_tensor, cap
 
 
+
+'''
+Note added by Haozhe 11/27/20:
+The dataset is extremely large (15 gb for zip files, and more after extracted)
+My own PC and Purdue CS CUDA machine does not have enough storage quota for the dataset
+I upgraded my google drive to 100 gb and downloaded it to google drive and run it with Colab
+For some reason, using this code to download the image dataset seems to give a corrupted train2014.zip
+I ended up using wget to download and then use 7za to unzip it before running this program
+'''
 def getRawData():
-    annotation_folder = '/annotations/'
+    print("---getRawData---")
+    annotation_folder = './annotations/'
     annotation_file = './annotations/captions_train2014.json'
-    if not os.path.exists(os.path.abspath('.') + annotation_folder):
+    '''if not os.path.exists(os.path.abspath('.') + annotation_folder):
         annotation_zip = tf.keras.utils.get_file('captions.zip',
                                                  cache_subdir=os.path.abspath(
                                                      '.'),
                                                  origin='http://images.cocodataset.org/annotations/annotations_trainval2014.zip',
                                                  extract=True)
-        '''annotation_file = os.path.dirname(
+        annotation_file = os.path.dirname(
             annotation_zip) + '/annotations/captions_train2014.json'
         os.remove(annotation_zip)'''
 
     # Download image files
-    image_folder = '/train2014/'
-    if not os.path.exists(os.path.abspath('.') + image_folder):
+    image_folder = '/content/drive/MyDrive/train2014/'
+    ''' if not os.path.exists(os.path.abspath('.') + image_folder):
         image_zip = tf.keras.utils.get_file('train2014.zip',
                                             cache_subdir=os.path.abspath('.'),
                                             origin='http://images.cocodataset.org/zips/train2014.zip',
                                             extract=True)
         PATH = os.path.dirname(image_zip) + image_folder
         os.remove(image_zip)
-    else:
-        PATH = os.path.abspath('.') + image_folder
+    else:'''
 
     with open(annotation_file, 'r') as f:
         annotations = json.load(f)
@@ -167,16 +185,21 @@ def getRawData():
     image_path_to_caption = collections.defaultdict(list)
     for val in annotations['annotations']:
         caption = f"<start> {val['caption']} <end>"
-        image_path = PATH + 'COCO_train2014_' + '%012d.jpg' % (val['image_id'])
+        image_path = '/content/drive/MyDrive/train2014/COCO_train2014_' + '%012d.jpg' % (val['image_id'])
         image_path_to_caption[image_path].append(caption)
-    image_paths = list(image_path_to_caption.keys())
+    # image_paths = list(image_path_to_caption.keys())
+    # use images that exist in the files, rather than those
+    image_paths = [join(image_folder, f) for f in listdir(image_folder) if isfile(join(image_folder, f))]
+    image_paths = image_paths[:IMAGE_EXAMPLE_SIZE]
+    print("image_paths: " + str(len(image_paths)) + str(image_paths[:5]))
     random.shuffle(image_paths)
     return image_paths, image_path_to_caption
 
 
 def preprocessData(raw):
+    print("---preprocessData---")
     global MAX_LENGTH
-    global image_feature_extraction_model
+    global image_features_extract_model
 
     image_paths, image_path_to_caption = raw
 
@@ -184,6 +207,7 @@ def preprocessData(raw):
     # we will duplicate the images so that we have (image, caption) pairs
 
     train_captions = []
+
     img_name_vector = []
     for image_path in image_paths:
         caption_list = image_path_to_caption[image_path]
@@ -191,7 +215,7 @@ def preprocessData(raw):
         img_name_vector.extend([image_path] * len(caption_list))
     encode_train = sorted(set(img_name_vector))
 
-    image_dataset = tf.data.Dataset.from_tensor_slices(encode_train)
+    image_dataset = tf.data.Dataset.from_tensor_slices(image_paths)
     image_dataset = image_dataset.map(
         load_image, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(16)
 
@@ -204,13 +228,14 @@ def preprocessData(raw):
 
     # cache the features of image extracted by InceptionV3 to the disk
     # because the memory in RAM is not sufficient to store these features for all images
-    for img, path in image_dataset:
+    # Note: only need to run in the frist time. Haozhe 11/25/20
+    '''for img, path in tqdm(image_dataset):
         batch_features = image_features_extract_model(img)
         batch_features = tf.reshape(batch_features,
                                     (batch_features.shape[0], -1, batch_features.shape[3]))
         for bf, p in zip(batch_features, path):
             path_of_feature = p.numpy().decode("utf-8")
-            np.save(path_of_feature, bf.numpy())
+            np.save(path_of_feature, bf.numpy())'''
 
     # img_name_vector is a list of image file paths
     # train_captions is a list of corresponding captions
@@ -229,7 +254,8 @@ def preprocessData(raw):
 
     # Create the tokenized vectors
     train_seqs = tokenizer.texts_to_sequences(train_captions)
-
+    print("padding: ")
+    print(train_seqs[:5])
     # Pad each vector to the max_length of the captions
     # If you do not provide a max_length value, pad_sequences calculates it automatically
     cap_vector = tf.keras.preprocessing.sequence.pad_sequences(
@@ -251,6 +277,7 @@ def preprocessData(raw):
     slice_index = int(len(img_keys)*0.8)
     img_name_train_keys, img_name_val_keys = img_keys[:
                                                       slice_index], img_keys[slice_index:]
+    print("parsing dataset")
 
     img_name_train = []
     cap_train = []
@@ -259,6 +286,8 @@ def preprocessData(raw):
         img_name_train.extend([imgt] * capt_len)
         cap_train.extend(img_to_cap_vector[imgt])
 
+    img_name_val = []
+    cap_val = []
     for imgv in img_name_val_keys:
         capv_len = len(img_to_cap_vector[imgv])
         img_name_val.extend([imgv] * capv_len)
@@ -272,20 +301,19 @@ def preprocessData(raw):
     attention_features_shape = 64
 
     dataset = tf.data.Dataset.from_tensor_slices((img_name_train, cap_train))
-
     # Use map to load the numpy files in parallel
     dataset = dataset.map(lambda item1, item2: tf.numpy_function(
         map_func, [item1, item2], [tf.float32, tf.int32]),
         num_parallel_calls=tf.data.experimental.AUTOTUNE)
-
     # Shuffle and batch
-    dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+    dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=False)
     dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
-    return dataset
+    return dataset, (img_name_val, cap_val)
 
 
 def trainModel(dataset, epochs=10000):
+    print("---trainModel---")
     encoder = EncoderModel(image_embedding_dim=128)
     decoder = DecoderModel(pred_embedding_dim=128,
                            hidden_dim=128, vocab_size=VOCAB_SIZE)
@@ -318,6 +346,9 @@ def trainModel(dataset, epochs=10000):
     for epoch in range(start_epoch, epochs):
         total_loss = 0
         for (batch, (image, caption)) in enumerate(dataset):
+            if image.shape[0] != BATCH_SIZE:
+                print(image.shape)
+                continue
             loss = 0
             # use 0s as the initial hidden state to feed in the GRU
             previous_hidden_state = tf.zeros((BATCH_SIZE, decoder.hidden_dim))
@@ -331,7 +362,7 @@ def trainModel(dataset, epochs=10000):
                 # teacher forcing to predict each token in the caption
                 for i in range(1, caption.shape[1]):
                     # passing the features through the decoder
-                    predict, hidden = decoder.call(image_embedding=image_features,
+                    predict, hidden, _ = decoder.call(image_embedding=image_features,
                                                    previous_predict=previous_decoder_predict,
                                                    previous_hidden_state=previous_hidden_state)
                     loss += loss_function(caption[:, i], predict)
@@ -358,30 +389,35 @@ def trainModel(dataset, epochs=10000):
 
 
 def evaluate(image, encoder, decoder):
+    print("---evaluate---")
+
     attention_plot = np.zeros((MAX_LENGTH, ATTENTION_SIZE))
-    hidden = decoder.reset_state(batch_size=1)
     temp_input = tf.expand_dims(load_image(image)[0], 0)
     img_tensor_val = image_features_extract_model(temp_input)
-    img_tensor_val = tf.reshape(
-        img_tensor_val, (img_tensor_val.shape[0], -1, img_tensor_val.shape[3]))
+    img_tensor_val = tf.reshape(img_tensor_val, [1, ATTENTION_SIZE, -1])
+    print(img_tensor_val.shape)
 
     features = encoder(img_tensor_val)
-    dec_input = tf.expand_dims([tokenizer.word_index['<start>']], 0)
-    result = []
+    print(features.shape)
+    # use 0s as the initial hidden state to feed in the GRU
+    previous_hidden_state = tf.zeros((1, decoder.hidden_dim))
+    previous_decoder_predict = tf.expand_dims([tokenizer.word_index['<start>']], 0)
+
+    result = ['<start>']
 
     for i in range(MAX_LENGTH):
-        predictions, hidden, attention_weights = decoder(
-            dec_input, features, hidden)
+        previous_decoder_predict, previous_hidden_state, attention_weights = decoder(
+            features, previous_decoder_predict, previous_hidden_state)
 
         attention_plot[i] = tf.reshape(attention_weights, (-1, )).numpy()
 
-        predicted_id = tf.random.categorical(predictions, 1)[0][0].numpy()
+        predicted_id = tf.random.categorical(previous_decoder_predict, 1)[0][0].numpy()
         result.append(tokenizer.index_word[predicted_id])
 
         if tokenizer.index_word[predicted_id] == '<end>':
             return result, attention_plot
 
-        dec_input = tf.expand_dims([predicted_id], 0)
+        previous_decoder_predict = tf.expand_dims([predicted_id], 0)
 
     attention_plot = attention_plot[:len(result), :]
     return result, attention_plot
@@ -407,12 +443,16 @@ def plot_attention(image, result, attention_plot):
 # Run captioning on validation set
 # This only runs on 1 random sample in our dataset.
 # This is for previewing the results only, since we will have a separate evaluation script
-def runModel():
-    rid = np.random.randint(0, len(img_name_val))
-    image = img_name_val[rid]
+def runModel(model, test_set):
+    test_image, test_caption = test_set
+    print("---runModel---")
+    encoder, decoder = model
+    rid = np.random.randint(0, len(test_image))
+    image = test_image[rid]
+    print("Test Image: " + str(image))
     real_caption = ' '.join([tokenizer.index_word[i]
-                             for i in cap_val[rid] if i not in [0]])
-    result, attention_plot = evaluate(image)
+                             for i in test_caption[rid] if i not in [0]])
+    result, attention_plot = evaluate(image, encoder, decoder)
 
     print('Real Caption:', real_caption)
     print('Prediction Caption:', ' '.join(result))
@@ -422,9 +462,9 @@ def runModel():
 def main():
     print("Image Captioning Main")
     raw = getRawData()
-    train_dataset, test_dataset = preprocessData(raw)
-    model = trainModel(train_dataset)
-    runModel()
+    dataset_train, dataset_test = preprocessData(raw)
+    model = trainModel(dataset_train)
+    runModel(model, dataset_test)
 
 if __name__ == '__main__':
     main()
