@@ -14,7 +14,6 @@ from tqdm import tqdm
 import pickle
 import matplotlib.pyplot as plt
 
-
 # global variables
 
 # I put it outside the function because this needs to be referenced in training. Haozhe 11/09/20
@@ -24,14 +23,14 @@ ATTENTION_SIZE = 64
 BATCH_SIZE = 64
 BUFFER_SIZE = 1000
 MAX_LENGTH = 0  # will be updated after pre-processing
-IMAGE_EXAMPLE_SIZE = 6000 # only uses 6000 image. using full image set requires too much storage space.
+IMAGE_EXAMPLE_SIZE = 6000  # only uses 6000 image. using full image set requires too much storage space.
 top_k = 5000
 image_features_extract_model = None  # will be updated after pre-processing
 tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
                                                   oov_token="<unk>",
                                                   filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
-VOCAB_SIZE = top_k+1
-CHECKPOINT_PATH = "./baseline_checkpoints/train"
+VOCAB_SIZE = top_k + 1
+CHECKPOINT_PATH = "./topdown_checkpoints/train"
 
 
 class EncoderModel(tf.keras.Model):
@@ -70,60 +69,56 @@ class DecoderModel(tf.keras.Model):
         # decoder layers
         self.embeddingLayer = tf.keras.layers.Embedding(
             vocab_size, pred_embedding_dim)
-        self.decoderGRU = tf.keras.layers.GRU(hidden_dim, return_state=True)
-        self.decoderFC1 = tf.keras.layers.Dense(hidden_dim)
-        self.decoderFC2 = tf.keras.layers.Dense(vocab_size)
+
+        self.decoderLSTM1 = tf.keras.layers.LSTM(hidden_dim, return_state=True)
+        self.decoderLSTM2 = tf.keras.layers.LSTM(hidden_dim, return_state=True)
+
+        self.decoderFC = tf.keras.layers.Dense(vocab_size)
 
     '''
        Input: 
            image_embedding: the output from the encoder. This does not vary with time steps
            previous_predict: the predicted token from the decoder at the time step t-1
-           previous_hidden_state: the hidden state from the decoder GRU at the time step t-1
+           previous_hidden_1: the hidden state from LSTM1 at the time step t-1
+           previous_hidden_2: the hidden state from LSTM2 at the time step t-1
        Output: 
            predict: the predicted token for the time step t
-           hidden_state: the hidden state from the decoder GRU at the time step t
+           hidden_state: the hidden state from the decoder LSTM at the time step t
        '''
 
-    def call(self, image_embedding, previous_predict, previous_hidden_state):
-
-        # A. attention mechanism:
+    def call(self, image_embedding, previous_predict, previous_hidden_2):
+        # A. top-down attention LSTM:
         # use image_embedding and previous_hidden_state to produce attention weights
         # use this attention weights to filter important features from image_embedding
 
-        hidden_with_time_axis = tf.expand_dims(previous_hidden_state, 1)
+        prev_hidden_2_embedding = tf.expand_dims(previous_hidden_2, 1)
+        prev_token_embedding = self.embeddingLayer(previous_predict)
+        input_to_lstm_1 = tf.concat([prev_hidden_2_embedding, image_embedding, prev_token_embedding], axis=1)
+        _, hidden_1, _ = self.decoderLSTM1(input_to_lstm_1)
+
         at_image = self.attendImage(image_embedding)
-        #print("at_image")
-        #print(at_image.shape)
-        at_pred = self.attendHidden(hidden_with_time_axis)
-        #print("at_pred")
-        #print(at_pred.shape)
+        at_pred = self.attendHidden(hidden_1)
         score = self.attendDense(tf.nn.tanh(at_image + at_pred))
         attention_weights = tf.nn.softmax(score, axis=1)
         context_vector = attention_weights * image_embedding
+        # this is the attended image vector
         context_vector = tf.reduce_sum(context_vector, axis=1)
 
-
-        #print("context vector")
-        #print(context_vector.shape)
+        # print("context vector")
+        # print(context_vector.shape)
 
         # B. decoding from attended context vector:
 
-        # map the previous prediction (a word token) into embedding (a vector representation of that word)
-        # so that it can be feed into the GRU layer
-        predict_embedding = self.embeddingLayer(previous_predict)
+        # concatenate context_vector and predict_embedding to use as the input to LSTM
+        hidden_1_embedding = tf.expand_dims(hidden_1, 1)
+        input_to_lstm_2 = tf.concat(
+            [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), hidden_1_embedding],
+            axis=1)
+        _, hidden_2, _ = self.decoderLSTM1(input_to_lstm_2)
 
-        # concatenate context_vector and predict_embedding to use as the input to GRU
-        # concat_embedding: (batch_size, 1, pred_embedding_dim + hidden_size)
-        concat_embedding = tf.concat(
-            [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), predict_embedding], axis=-1)
+        predict = self.decoderFC(hidden_2)
 
-        # passing the concatenated vector to the GRU
-        predict, hidden_state = self.decoderGRU(concat_embedding)
-
-        predict = self.decoderFC1(predict)
-        predict = self.decoderFC2(predict)
-
-        return predict, hidden_state, attention_weights
+        return predict, hidden_2, attention_weights
 
 
 def load_image(image_path):
@@ -137,13 +132,13 @@ def load_image(image_path):
 def calc_max_length(tensor):
     return max(len(t) for t in tensor)
 
+
 # Load the numpy files
 
 
 def map_func(img_name, cap):
-    img_tensor = np.load(img_name.decode('utf-8')+'.npy')
+    img_tensor = np.load(img_name.decode('utf-8') + '.npy')
     return img_tensor, cap
-
 
 
 '''
@@ -154,6 +149,8 @@ I upgraded my google drive to 100 gb and downloaded it to google drive and run i
 For some reason, using this code to download the image dataset seems to give a corrupted train2014.zip
 I ended up using wget to download and then use 7za to unzip it before running this program
 '''
+
+
 def getRawData():
     print("---getRawData---")
     annotation_folder = './annotations/'
@@ -274,7 +271,7 @@ def preprocessData(raw):
     img_keys = list(img_to_cap_vector.keys())
     random.shuffle(img_keys)
 
-    slice_index = int(len(img_keys)*0.8)
+    slice_index = int(len(img_keys) * 0.8)
     img_name_train_keys, img_name_val_keys = img_keys[:
                                                       slice_index], img_keys[slice_index:]
     print("parsing dataset")
@@ -304,7 +301,7 @@ def preprocessData(raw):
     # Use map to load the numpy files in parallel
     dataset = dataset.map(lambda item1, item2: tf.numpy_function(
         map_func, [item1, item2], [tf.float32, tf.int32]),
-        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
     # Shuffle and batch
     dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=False)
     dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -312,7 +309,7 @@ def preprocessData(raw):
     return dataset, (img_name_val, cap_val)
 
 
-def trainModel(dataset, epochs=5000):
+def trainModel(dataset, epochs=1000):
     print("---trainModel---")
     encoder = EncoderModel(image_embedding_dim=128)
     decoder = DecoderModel(pred_embedding_dim=128,
@@ -350,9 +347,9 @@ def trainModel(dataset, epochs=5000):
                 # print(image.shape)
                 continue
             loss = 0
-            # use 0s as the initial hidden state to feed in the GRU
+            # use 0s as the initial hidden state to feed in the LSTM
             previous_hidden_state = tf.zeros((BATCH_SIZE, decoder.hidden_dim))
-            # use <start> as the initial predict to feed in the GRU
+            # use <start> as the initial predict to feed in the LSTM
             previous_decoder_predict = tf.expand_dims(
                 [tokenizer.word_index['<start>']] * caption.shape[0], 1)
 
@@ -363,8 +360,8 @@ def trainModel(dataset, epochs=5000):
                 for i in range(1, caption.shape[1]):
                     # passing the features through the decoder
                     predict, hidden, _ = decoder.call(image_embedding=image_features,
-                                                   previous_predict=previous_decoder_predict,
-                                                   previous_hidden_state=previous_hidden_state)
+                                                      previous_predict=previous_decoder_predict,
+                                                      previous_hidden_2=previous_hidden_state)
                     loss += loss_function(caption[:, i], predict)
 
                     # needs to expand the dimension to match the input shape of the decoder
@@ -398,8 +395,9 @@ def evaluate(image, encoder, decoder):
 
     features = encoder(img_tensor_val)
     print(features.shape)
-    # use 0s as the initial hidden state to feed in the GRU
+    # use 0s as the initial hidden state to feed in the LSTM
     previous_hidden_state = tf.zeros((1, decoder.hidden_dim))
+
     previous_decoder_predict = tf.expand_dims([tokenizer.word_index['<start>']], 0)
 
     result = ['<start>']
@@ -408,7 +406,7 @@ def evaluate(image, encoder, decoder):
         previous_decoder_predict, previous_hidden_state, attention_weights = decoder(
             features, previous_decoder_predict, previous_hidden_state)
 
-        attention_plot[i] = tf.reshape(attention_weights, (-1, )).numpy()
+        attention_plot[i] = tf.reshape(attention_weights, (-1,)).numpy()
 
         predicted_id = tf.random.categorical(previous_decoder_predict, 1)[0][0].numpy()
         result.append(tokenizer.index_word[predicted_id])
@@ -427,17 +425,17 @@ def plot_attention(image, result, attention_plot):
 
     fig = plt.figure(figsize=(10, 10))
 
-    len_result = len(result) - 1
+    len_result = len(result)
     for l in range(len_result):
         temp_att = np.resize(attention_plot[l], (8, 8))
-        ax = fig.add_subplot(len_result//2, len_result//2, l+1)
+        ax = fig.add_subplot(len_result // 2, len_result // 2, l + 1)
         ax.set_title(result[l])
         img = ax.imshow(temp_image)
         ax.imshow(temp_att, cmap='gray', alpha=0.6, extent=img.get_extent())
 
     plt.tight_layout()
     plt.show()
-    plt.savefig('./baseline_attention_' + str(image)[-20:-4] + '.pdf')
+    plt.savefig('./topdown_attention_' + str(image)[-20:-4] + '.pdf')
 
 
 # Run captioning on validation set
@@ -448,7 +446,8 @@ def runModel(model, test_set):
     print("---runModel---")
     encoder, decoder = model
     rid = np.random.randint(0, len(test_image))
-    image = test_image[rid]
+    # image = test_image[rid]
+    image = '/content/drive/MyDrive/train2014/COCO_train2014_000000286009.jpg'
     print("Test Image: " + str(image))
     real_caption = ' '.join([tokenizer.index_word[i]
                              for i in test_caption[rid] if i not in [0]])
@@ -465,6 +464,7 @@ def main():
     dataset_train, dataset_test = preprocessData(raw)
     model = trainModel(dataset_train)
     runModel(model, dataset_test)
+
 
 if __name__ == '__main__':
     main()
