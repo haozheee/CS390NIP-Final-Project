@@ -1,4 +1,5 @@
 from nltk.translate.bleu_score import sentence_bleu
+from nltk.translate.bleu_score import corpus_bleu
 
 # https://machinelearningmastery.com/calculate-bleu-score-for-text-python/
 
@@ -16,24 +17,20 @@ class BleuScorer:
     def compute_bleu1(self, ref, cand):
         # references = [['this', 'is', 'a', 'test'], ['this', 'is' 'test']]
         # candidates = ['this', 'is', 'a', 'test']
-        score = sentence_bleu([ref], cand, weights=(1,0,0,0) )
+        print(len(ref))
+        print(len(cand))
+        score = corpus_bleu(ref, cand, weights=(1,0,0,0) )
         return score
 
     def compute_bleu4(self, ref, cand):
-        score = sentence_bleu([ref], cand, weights=(0,0,0,1) )
+        score = corpus_bleu(ref, cand, weights=(0.25,0.25,0.25,0.25) )
         return score
 
     # return bleu1 and bleu4 score
     def compute_score(self):
-        bleu1 = 0
-        bleu4 = 0
-        for i in range(len(self.ref)):
-            san_ref = sanitize(self.ref[i])
-            san_cand = sanitize(self.cand[i])
-            bleu1 += self.compute_bleu1(san_ref, san_cand)
-            bleu4 += self.compute_bleu4(san_ref, san_cand)
-
-        return bleu1/len(self.ref), bleu4/len(self.ref)
+        bleu1 = self.compute_bleu1(self.ref, self.cand)
+        bleu4 = self.compute_bleu4(self.ref, self.cand)
+        return bleu1, bleu4
         
 
 

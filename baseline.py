@@ -14,24 +14,26 @@ from tqdm import tqdm
 import pickle
 import matplotlib.pyplot as plt
 
-
 # global variables
 
 # I put it outside the function because this needs to be referenced in training. Haozhe 11/09/20
+from bleu import BleuScorer
 
 FEATURE_SIZE = 2048
 ATTENTION_SIZE = 64
 BATCH_SIZE = 64
 BUFFER_SIZE = 1000
 MAX_LENGTH = 0  # will be updated after pre-processing
-IMAGE_EXAMPLE_SIZE = 6000 # only uses 6000 image. using full image set requires too much storage space.
+IMAGE_EXAMPLE_SIZE = 6000  # only uses 6000 image. using full image set requires too much storage space.
 top_k = 5000
 image_features_extract_model = None  # will be updated after pre-processing
 tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
                                                   oov_token="<unk>",
                                                   filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
-VOCAB_SIZE = top_k+1
+VOCAB_SIZE = top_k + 1
 CHECKPOINT_PATH = "./baseline_checkpoints/train"
+
+CUSTOM_IMAGES = ['./custom_image/c_football.jpg', './custom_image/c_statue.jpg']
 
 
 class EncoderModel(tf.keras.Model):
@@ -85,26 +87,24 @@ class DecoderModel(tf.keras.Model):
        '''
 
     def call(self, image_embedding, previous_predict, previous_hidden_state):
-
         # A. attention mechanism:
         # use image_embedding and previous_hidden_state to produce attention weights
         # use this attention weights to filter important features from image_embedding
 
         hidden_with_time_axis = tf.expand_dims(previous_hidden_state, 1)
         at_image = self.attendImage(image_embedding)
-        #print("at_image")
-        #print(at_image.shape)
+        # print("at_image")
+        # print(at_image.shape)
         at_pred = self.attendHidden(hidden_with_time_axis)
-        #print("at_pred")
-        #print(at_pred.shape)
+        # print("at_pred")
+        # print(at_pred.shape)
         score = self.attendDense(tf.nn.tanh(at_image + at_pred))
         attention_weights = tf.nn.softmax(score, axis=1)
         context_vector = attention_weights * image_embedding
         context_vector = tf.reduce_sum(context_vector, axis=1)
 
-
-        #print("context vector")
-        #print(context_vector.shape)
+        # print("context vector")
+        # print(context_vector.shape)
 
         # B. decoding from attended context vector:
 
@@ -115,7 +115,8 @@ class DecoderModel(tf.keras.Model):
         # concatenate context_vector and predict_embedding to use as the input to GRU
         # concat_embedding: (batch_size, 1, pred_embedding_dim + hidden_size)
         concat_embedding = tf.concat(
-            [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), predict_embedding], axis=-1)
+            [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), predict_embedding],
+            axis=-1)
 
         # passing the concatenated vector to the GRU
         predict, hidden_state = self.decoderGRU(concat_embedding)
@@ -137,13 +138,13 @@ def load_image(image_path):
 def calc_max_length(tensor):
     return max(len(t) for t in tensor)
 
+
 # Load the numpy files
 
 
 def map_func(img_name, cap):
-    img_tensor = np.load(img_name.decode('utf-8')+'.npy')
+    img_tensor = np.load(img_name.decode('utf-8') + '.npy')
     return img_tensor, cap
-
 
 
 '''
@@ -154,6 +155,8 @@ I upgraded my google drive to 100 gb and downloaded it to google drive and run i
 For some reason, using this code to download the image dataset seems to give a corrupted train2014.zip
 I ended up using wget to download and then use 7za to unzip it before running this program
 '''
+
+
 def getRawData():
     print("---getRawData---")
     annotation_folder = './annotations/'
@@ -274,7 +277,7 @@ def preprocessData(raw):
     img_keys = list(img_to_cap_vector.keys())
     random.shuffle(img_keys)
 
-    slice_index = int(len(img_keys)*0.8)
+    slice_index = int(len(img_keys) * 0.8)
     img_name_train_keys, img_name_val_keys = img_keys[:
                                                       slice_index], img_keys[slice_index:]
     print("parsing dataset")
@@ -304,7 +307,7 @@ def preprocessData(raw):
     # Use map to load the numpy files in parallel
     dataset = dataset.map(lambda item1, item2: tf.numpy_function(
         map_func, [item1, item2], [tf.float32, tf.int32]),
-        num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                          num_parallel_calls=tf.data.experimental.AUTOTUNE)
     # Shuffle and batch
     dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=False)
     dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
@@ -363,8 +366,8 @@ def trainModel(dataset, epochs=5000):
                 for i in range(1, caption.shape[1]):
                     # passing the features through the decoder
                     predict, hidden, _ = decoder.call(image_embedding=image_features,
-                                                   previous_predict=previous_decoder_predict,
-                                                   previous_hidden_state=previous_hidden_state)
+                                                      previous_predict=previous_decoder_predict,
+                                                      previous_hidden_state=previous_hidden_state)
                     loss += loss_function(caption[:, i], predict)
 
                     # needs to expand the dimension to match the input shape of the decoder
@@ -387,10 +390,10 @@ def trainModel(dataset, epochs=5000):
     return encoder, decoder
 
 
+
 def evaluate(image, encoder, decoder):
     print("---evaluate---")
 
-    attention_plot = np.zeros((MAX_LENGTH, ATTENTION_SIZE))
     temp_input = tf.expand_dims(load_image(image)[0], 0)
     img_tensor_val = image_features_extract_model(temp_input)
     img_tensor_val = tf.reshape(img_tensor_val, [1, ATTENTION_SIZE, -1])
@@ -398,8 +401,9 @@ def evaluate(image, encoder, decoder):
 
     features = encoder(img_tensor_val)
     print(features.shape)
-    # use 0s as the initial hidden state to feed in the GRU
+    # use 0s as the initial hidden state to feed in the LSTM
     previous_hidden_state = tf.zeros((1, decoder.hidden_dim))
+
     previous_decoder_predict = tf.expand_dims([tokenizer.word_index['<start>']], 0)
 
     result = ['<start>']
@@ -408,37 +412,15 @@ def evaluate(image, encoder, decoder):
         previous_decoder_predict, previous_hidden_state, attention_weights = decoder(
             features, previous_decoder_predict, previous_hidden_state)
 
-        attention_plot[i] = tf.reshape(attention_weights, (-1, )).numpy()
-
         predicted_id = tf.random.categorical(previous_decoder_predict, 1)[0][0].numpy()
         result.append(tokenizer.index_word[predicted_id])
 
         if tokenizer.index_word[predicted_id] == '<end>':
-            return result, attention_plot
+            return result
 
         previous_decoder_predict = tf.expand_dims([predicted_id], 0)
 
-    attention_plot = attention_plot[:len(result), :]
-    return result, attention_plot
-
-
-def plot_attention(image, result, attention_plot):
-    temp_image = np.array(Image.open(image))
-
-    fig = plt.figure(figsize=(10, 10))
-
-    len_result = len(result) - 1
-    for l in range(len_result):
-        temp_att = np.resize(attention_plot[l], (8, 8))
-        ax = fig.add_subplot(len_result//2, len_result//2, l+1)
-        ax.set_title(result[l])
-        img = ax.imshow(temp_image)
-        ax.imshow(temp_att, cmap='gray', alpha=0.6, extent=img.get_extent())
-
-    plt.tight_layout()
-    plt.show()
-    plt.savefig('./baseline_attention_' + str(image)[-20:-4] + '.pdf')
-
+    return result
 
 # Run captioning on validation set
 # This only runs on 1 random sample in our dataset.
@@ -447,17 +429,33 @@ def runModel(model, test_set):
     test_image, test_caption = test_set
     print("---runModel---")
     encoder, decoder = model
-    rid = np.random.randint(0, len(test_image))
-    image = test_image[rid]
-    print("Test Image: " + str(image))
-    real_caption = ' '.join([tokenizer.index_word[i]
-                             for i in test_caption[rid] if i not in [0]])
-    result, attention_plot = evaluate(image, encoder, decoder)
+    references = []
+    candidates = []
+    for idx in range(0, len(test_image)):
+        image = test_image[idx]
+        print("Test Image: " + str(image))
+        real_caption = ' '.join([tokenizer.index_word[i]
+                                 for i in test_caption[idx] if i not in [0]])
+        result = evaluate(image, encoder, decoder)
+        pred_caption = ' '.join(result)
+        print('Real Caption:', real_caption)
+        print('Prediction Caption:', pred_caption)
+        references.append(real_caption)
+        candidates.append(pred_caption)
 
-    print('Real Caption:', real_caption)
-    print('Prediction Caption:', ' '.join(result))
-    plot_attention(image, result, attention_plot)
+    scorer = BleuScorer(references, candidates)
+    bleu1, bleu4 = scorer.compute_score()
+    print('BLUE-1: ', bleu1)
+    print('BLUE-4: ', bleu4)
 
+
+def runCustom(model):
+    encoder, decoder = model
+    for image in CUSTOM_IMAGES:
+        print('Custom Image:', image)
+        result = evaluate(image, encoder, decoder)
+        pred_caption = ' '.join(result)
+        print('Prediction Caption:', pred_caption)
 
 def main():
     print("Image Captioning Main")
@@ -465,6 +463,7 @@ def main():
     dataset_train, dataset_test = preprocessData(raw)
     model = trainModel(dataset_train)
     runModel(model, dataset_test)
+    runCustom(model)
 
 if __name__ == '__main__':
     main()
