@@ -31,7 +31,7 @@ tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
                                                   oov_token="<unk>",
                                                   filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
 VOCAB_SIZE = top_k+1
-CHECKPOINT_PATH = "./baseline_checkpoints/train"
+CHECKPOINT_PATH = "./lstm_checkpoints/train"
 
 
 class EncoderModel(tf.keras.Model):
@@ -70,7 +70,8 @@ class DecoderModel(tf.keras.Model):
         # decoder layers
         self.embeddingLayer = tf.keras.layers.Embedding(
             vocab_size, pred_embedding_dim)
-        self.decoderGRU = tf.keras.layers.GRU(hidden_dim, return_state=True)
+        self.decoderLSTM = tf.keras.layers.LSTM(hidden_dim, return_state=True)
+
         self.decoderFC1 = tf.keras.layers.Dense(hidden_dim)
         self.decoderFC2 = tf.keras.layers.Dense(vocab_size)
 
@@ -78,10 +79,10 @@ class DecoderModel(tf.keras.Model):
        Input: 
            image_embedding: the output from the encoder. This does not vary with time steps
            previous_predict: the predicted token from the decoder at the time step t-1
-           previous_hidden_state: the hidden state from the decoder GRU at the time step t-1
+           previous_hidden_state: the hidden state from the decoder LSTM at the time step t-1
        Output: 
            predict: the predicted token for the time step t
-           hidden_state: the hidden state from the decoder GRU at the time step t
+           hidden_state: the hidden state from the decoder LSTM at the time step t
        '''
 
     def call(self, image_embedding, previous_predict, previous_hidden_state):
@@ -109,16 +110,16 @@ class DecoderModel(tf.keras.Model):
         # B. decoding from attended context vector:
 
         # map the previous prediction (a word token) into embedding (a vector representation of that word)
-        # so that it can be feed into the GRU layer
+        # so that it can be feed into the LSTM layer
         predict_embedding = self.embeddingLayer(previous_predict)
 
-        # concatenate context_vector and predict_embedding to use as the input to GRU
+        # concatenate context_vector and predict_embedding to use as the input to LSTM
         # concat_embedding: (batch_size, 1, pred_embedding_dim + hidden_size)
         concat_embedding = tf.concat(
             [tf.reshape(tf.expand_dims(context_vector, 1), [image_embedding.shape[0], 1, -1]), predict_embedding], axis=-1)
 
-        # passing the concatenated vector to the GRU
-        predict, hidden_state = self.decoderGRU(concat_embedding)
+        # passing the concatenated vector to the LSTM (ignore cell states)
+        predict, hidden_state, _= self.decoderLSTM(concat_embedding)
 
         predict = self.decoderFC1(predict)
         predict = self.decoderFC2(predict)
@@ -350,9 +351,9 @@ def trainModel(dataset, epochs=5000):
                 # print(image.shape)
                 continue
             loss = 0
-            # use 0s as the initial hidden state to feed in the GRU
+            # use 0s as the initial hidden state to feed in the LSTM
             previous_hidden_state = tf.zeros((BATCH_SIZE, decoder.hidden_dim))
-            # use <start> as the initial predict to feed in the GRU
+            # use <start> as the initial predict to feed in the LSTM
             previous_decoder_predict = tf.expand_dims(
                 [tokenizer.word_index['<start>']] * caption.shape[0], 1)
 
@@ -397,9 +398,10 @@ def evaluate(image, encoder, decoder):
     # print(img_tensor_val.shape)
 
     features = encoder(img_tensor_val)
-    print(features.shape)
-    # use 0s as the initial hidden state to feed in the GRU
+    print(image)
+    # use 0s as the initial hidden state to feed in the LSTM
     previous_hidden_state = tf.zeros((1, decoder.hidden_dim))
+
     previous_decoder_predict = tf.expand_dims([tokenizer.word_index['<start>']], 0)
 
     result = ['<start>']
@@ -427,7 +429,7 @@ def plot_attention(image, result, attention_plot):
 
     fig = plt.figure(figsize=(10, 10))
 
-    len_result = len(result) - 1
+    len_result = len(result)
     for l in range(len_result):
         temp_att = np.resize(attention_plot[l], (8, 8))
         ax = fig.add_subplot(len_result//2, len_result//2, l+1)
@@ -437,7 +439,7 @@ def plot_attention(image, result, attention_plot):
 
     plt.tight_layout()
     plt.show()
-    plt.savefig('./baseline_attention_' + str(image)[-20:-4] + '.pdf')
+    plt.savefig('./lstm_attention_'+str(image)[-20:-4]+'.pdf')
 
 
 # Run captioning on validation set
@@ -448,7 +450,8 @@ def runModel(model, test_set):
     print("---runModel---")
     encoder, decoder = model
     rid = np.random.randint(0, len(test_image))
-    image = test_image[rid]
+    # image = test_image[rid]
+    image = '/content/drive/MyDrive/train2014/COCO_train2014_000000286009.jpg'
     print("Test Image: " + str(image))
     real_caption = ' '.join([tokenizer.index_word[i]
                              for i in test_caption[rid] if i not in [0]])
